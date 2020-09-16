@@ -5,12 +5,19 @@ import serial
 
 import rospy
 from sensor_msgs.msg import BatteryState
-
+def parse_chemistry(value):
+    chems = {'nimh': 1, 'lion': 2, 'liion': 2, 'lipo': 3, 'life': 4, 'lifepo4': 4, 'nicd': 5, 'limn': 6, 'limno2': 6}
+    sanitised = value.lower().replace(' ','')
+    if not sanitised in chems:
+        return 0
+    else:
+        return chems[sanitised]
+        
 class BatteryMonitor(object):
     def __init__(self):
         self.pub = rospy.Publisher('battery', BatteryState, queue_size=10)
 
-        port = rospy.get_param('~Device', '/dev/ttyUSB0')
+        port = rospy.get_param('~Device', '/dev/bmv')
         rate = rospy.get_param('~BaudRate', 19200)
         self.battery_capacity = float(rospy.get_param('~Capacity', 0.0))
         self.location = rospy.get_param('~Location', 'N/A')
@@ -38,14 +45,6 @@ class BatteryMonitor(object):
             rospy.logerr(e)
             exit(-1)
 
-    def parse_chemistry(value):
-        chems = {'nimh': 1, 'lion': 2, 'liion': 2, 'lipo': 3, 'life': 4, 'lifepo4': 4, 'nicd': 5, 'limn': 6, 'limno2': 6}
-        sanitised = value.lower().replace(' ','')
-        if not sanitised in chems:
-            return 0
-        else:
-            return chems[sanitised]
-
     def run(self):
         try:
             msg = BatteryState()
@@ -54,6 +53,8 @@ class BatteryMonitor(object):
             msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_UNKNOWN
             msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_UNKNOWN
             msg.power_supply_technology = self.technology
+            msg.location = self.location
+            msg.serial_number = self.serial_number
             msg.present = False
 
             if not self.ser.isOpen():
@@ -62,15 +63,46 @@ class BatteryMonitor(object):
 
             self.ser.flushInput()
             while not rospy.is_shutdown():
-                line = self.ser.readline()
-                if len(line) >= 0:
+                data = ''
+                self.ser.flushInput()
+                while not rospy.is_shutdown() and data.lower()[0:3] != 'pid':
+                    data = self.ser.readline()
+                i = 2
+                while not rospy.is_shutdown() and i > 0:
+                    line = self.ser.readline()
+                    if 'checksum' in line.lower():
+                        i -= 1
+                    else:
+                        data += line
+                if not rospy.is_shutdown():
+                    status = {key:value for (key, value) in [line.strip().split('\t') for line in data.strip().split('\n')]}
                     msg.header.stamp = rospy.Time.now()
-                    msg.current = 0.0
-                    msg.voltage = 0.0
+                    msg.current = float(status['I'])*1e-3
+                    msg.voltage = float(status['V'])*1e-3
                     msg.present = True
-                    msg.percentage = 0.0
-                    msg.charge = 0.0
+                    msg.percentage = float(status['SOC'])*1e-3
+                    msg.charge = msg.capacity * msg.percentage
+                    
+                    if status['Alarm'] == 'OFF':
+                        msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
+                    else:
+                        ar = int(status['AR'])
+                        if (ar & 1)!=0 or (ar & 4)!=0 or (ar & 8)!=0:
+                            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_DEAD
+                        if (ar & 2)!=0 or (ar & 16)!=0:
+                            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_OVERVOLTAGE
+                        if (ar & 32)!=0:
+                            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_COLD
+                        if (ar & 64)!=0:
+                            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_OVERHEAT
+                        
+                    if msg.current < 0.0:
+                        msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
+                    else:
+                        msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_CHARGING
+                    
                     self.pub.publish(msg)
+                   
         except rospy.ROSInterruptException as e:
             print("ROS Interrupt Exception", e.message)
             self.ser.close()
@@ -78,3 +110,9 @@ class BatteryMonitor(object):
         except serial.serialutil.SerialException as e:
             print("!!! SERIAL EXCEPTION !!!", e.message)
             self.ser.close()
+
+if __name__ == '__main__':
+    rospy.init_node('BMVBatteryStatus')
+
+    batteryStatus = BatteryMonitor()
+    batteryStatus.run()

@@ -1,0 +1,2 @@
+SUBSYSTEMS=="usb", ATTRS{idProduct}=="6015", ATTRS{idVendor}=="0403", SYMLINK+="bmv bmv_$attr{serial}", MODE="0666"
+
