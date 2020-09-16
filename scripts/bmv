@@ -1,0 +1,80 @@
+#!/usr/bin/env python
+from __future__ import print_function, division
+
+import serial
+
+import rospy
+from sensor_msgs.msg import BatteryState
+
+class BatteryMonitor(object):
+    def __init__(self):
+        self.pub = rospy.Publisher('battery', BatteryState, queue_size=10)
+
+        port = rospy.get_param('~Device', '/dev/ttyUSB0')
+        rate = rospy.get_param('~BaudRate', 19200)
+        self.battery_capacity = float(rospy.get_param('~Capacity', 0.0))
+        self.location = rospy.get_param('~Location', 'N/A')
+        self.serial_number = rospy.get_param('~SerialNumber', '')
+        self.technology = parse_chemistry(rospy.get_param('~Chemistry', ''))
+
+        try:
+            self.ser = serial.Serial(port=port, baudrate=rate, timeout=1.0)
+            self.ser = serial.Serial()
+            self.ser.port = port
+            self.ser.baudrate = rate
+            self.ser.timeout = 1.0
+            self.ser.open()
+            self.ser.flushInput()
+        except serial.SerialTimeoutException as e:
+            rospy.logerr("Timeout exception: " + e.message)
+            exit(-1)
+        except serial.SerialException as e:
+            print(e)
+            exit(-1)
+            # No data
+            pass
+        except Exception as e:
+            rospy.logerr("Could not open serial port: " + port)
+            rospy.logerr(e)
+            exit(-1)
+
+    def parse_chemistry(value):
+        chems = {'nimh': 1, 'lion': 2, 'liion': 2, 'lipo': 3, 'life': 4, 'lifepo4': 4, 'nicd': 5, 'limn': 6, 'limno2': 6}
+        sanitised = value.lower().replace(' ','')
+        if not sanitised in chems:
+            return 0
+        else:
+            return chems[sanitised]
+
+    def run(self):
+        try:
+            msg = BatteryState()
+            msg.capacity = self.battery_capacity
+            msg.design_capacity = self.battery_capacity
+            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_UNKNOWN
+            msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_UNKNOWN
+            msg.power_supply_technology = self.technology
+            msg.present = False
+
+            if not self.ser.isOpen():
+                rospy.logerr("Serial port is not open!")
+                exit(-1)
+
+            self.ser.flushInput()
+            while not rospy.is_shutdown():
+                line = self.ser.readline()
+                if len(line) >= 0:
+                    msg.header.stamp = rospy.Time.now()
+                    msg.current = 0.0
+                    msg.voltage = 0.0
+                    msg.present = True
+                    msg.percentage = 0.0
+                    msg.charge = 0.0
+                    self.pub.publish(msg)
+        except rospy.ROSInterruptException as e:
+            print("ROS Interrupt Exception", e.message)
+            self.ser.close()
+
+        except serial.serialutil.SerialException as e:
+            print("!!! SERIAL EXCEPTION !!!", e.message)
+            self.ser.close()
